@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>Drive contents</title>
+<style>
+:root{--bg:#fbfbf9;--fg:#1c1f23;--mut:#677079;--line:#e3e5e2;--acc:#0b5fd3;--card:#f0f1ee;--dir:#b7791f}
+@media (prefers-color-scheme:dark){:root{--bg:#121416;--fg:#e9ebe8;--mut:#98a0a7;--line:#262a2e;--acc:#7aa9ff;--card:#1b1e21;--dir:#e0b050}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;font:16px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--fg);padding-bottom:env(safe-area-inset-bottom)}
+header{position:sticky;top:0;z-index:2;background:var(--bg);border-bottom:1px solid var(--line);padding:calc(env(safe-area-inset-top) + 10px) 14px 10px}
+h1{font-size:19px;margin:0;overflow-wrap:anywhere}
+.meta{color:var(--mut);font-size:13px;margin-top:3px}
+.bar{display:flex;gap:8px;margin-top:10px}
+input,select{font:inherit;padding:9px 11px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
+input{flex:1;min-width:0}
+.crumbs{display:flex;align-items:center;gap:6px;overflow-x:auto;white-space:nowrap;padding:9px 14px;font-size:14px;border-bottom:1px solid var(--line);scrollbar-width:none}
+.crumbs::-webkit-scrollbar{display:none}
+.crumbs a{color:var(--acc);cursor:pointer;padding:2px 0}
+.crumbs .cur{color:var(--fg);font-weight:600}
+.crumbs i{color:var(--mut);font-style:normal}
+ul{list-style:none;margin:0;padding:0}
+li{display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid var(--line)}
+li.dir{cursor:pointer}
+li.dir:active{background:var(--card)}
+.ic{width:22px;flex:none;text-align:center;color:var(--mut)}
+li.dir .ic{color:var(--dir)}
+.nm{flex:1;min-width:0;overflow-wrap:anywhere}
+.sub{display:block;color:var(--mut);font-size:12.5px;margin-top:1px}
+.sz{flex:none;color:var(--mut);font-size:13px;text-align:right}
+.note{padding:36px 18px;color:var(--mut);text-align:center}
+.note b{display:block;color:var(--fg);margin-bottom:4px}
+.stale{color:#b45309}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Loading drive...</h1>
+  <div class="meta" id="meta"></div>
+  <div class="bar">
+    <input id="q" type="search" placeholder="Search this folder and below" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <select id="sort" aria-label="Sort"><option value="name">Name</option><option value="size">Size</option><option value="date">Newest</option></select>
+  </div>
+</header>
+<nav class="crumbs" id="crumbs"></nav>
+<main><ul id="list"></ul><div id="msg"></div></main>
+<script>
+(async () => {
+  const $ = s => document.querySelector(s);
+  const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const fmt = n => { const u=['B','KB','MB','GB','TB']; let i=0; while(n>=1024&&i<4){n/=1024;i++} return (i?n.toFixed(n<10?1:0):n)+' '+u[i]; };
+  const day = t => new Date(t*1000).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'});
+  const isDir = e => Array.isArray(e[1]);
+  const plural = (n,w) => n.toLocaleString()+' '+w+(n===1?'':'s');
+
+  const id = new URLSearchParams(location.search).get('d');
+  const keyStr = location.hash.slice(1);
+  const note = (t, d) => { $('#msg').innerHTML = '<div class="note"><b>'+esc(t)+'</b>'+esc(d||'')+'</div>'; };
+
+  if (!id || !keyStr) { $('#title').textContent = 'Drive contents'; return note('No drive selected', 'Scan the QR code on a drive to open its contents.'); }
+
+  const b64u = s => { s = s.replace(/-/g,'+').replace(/_/g,'/'); while (s.length % 4) s += '='; return Uint8Array.from(atob(s), c => c.charCodeAt(0)); };
+
+  let data;
+  try {
+    const res = await fetch('data/' + encodeURIComponent(id) + '.bin?t=' + Date.now(), {cache:'no-store'});
+    if (!res.ok) throw new Error('missing');
+    const buf = new Uint8Array(await res.arrayBuffer());
+    const key = await crypto.subtle.importKey('raw', b64u(keyStr), 'AES-GCM', false, ['decrypt']);
+    const plain = await crypto.subtle.decrypt({name:'AES-GCM', iv: buf.slice(0,12)}, key, buf.slice(12));
+    const text = await new Response(new Blob([plain]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+    data = JSON.parse(text);
+  } catch (e) {
+    $('#title').textContent = 'Drive contents';
+    return note("Couldn't open this snapshot", 'The QR code may be damaged, or the drive has not been scanned yet.');
+  }
+
+  // Totals per folder
+  const root = ['', data.tree];
+  (function annotate(e){
+    let size=0, files=0, mtime=0;
+    for (const k of e[1]) {
+      if (isDir(k)) { annotate(k); size+=k.size; files+=k.files; mtime=Math.max(mtime,k.mtime); }
+      else { size+=k[1]; files++; mtime=Math.max(mtime,k[2]); }
+    }
+    e.size=size; e.files=files; e.mtime=mtime;
+  })(root);
+
+  document.title = data.name;
+  $('#title').textContent = data.name;
+  const age = Math.floor((Date.now()/1000 - data.scanned) / 86400);
+  const ageTxt = age < 1 ? 'today' : age === 1 ? 'yesterday' : age + ' days ago';
+  $('#meta').innerHTML = 'Snapshot from <span class="'+(age>30?'stale':'')+'">'+esc(day(data.scanned))+' ('+ageTxt+')</span> &middot; '
+    + plural(data.files,'file')+' &middot; '+fmt(data.used)+(data.total?' of '+fmt(data.total):'');
+
+  let stack = [root];
+  const cur = () => stack[stack.length-1];
+  let shown = [];
+
+  function sorted(list) {
+    const mode = $('#sort').value;
+    const sz = e => isDir(e) ? e.size : e[1];
+    const dt = e => isDir(e) ? e.mtime : e[2];
+    const cmp = {
+      name: (a,b) => a[0].localeCompare(b[0], undefined, {numeric:true, sensitivity:'base'}),
+      size: (a,b) => sz(b)-sz(a),
+      date: (a,b) => dt(b)-dt(a),
+    }[mode];
+    return [...list.filter(isDir).sort(cmp), ...list.filter(e => !isDir(e)).sort(cmp)];
+  }
+
+  function row(e, pathTxt) {
+    const dir = isDir(e);
+    const sub = pathTxt != null ? pathTxt
+      : dir ? plural(e.files,'file') + (e.mtime ? ' \u00b7 ' + day(e.mtime) : '')
+      : day(e[2]);
+    return '<li class="'+(dir?'dir':'')+'" data-i="'+(shown.length-1)+'"><span class="ic">'+(dir?'\u25a0':'\u25ab')+'</span>'
+      + '<span class="nm">'+esc(e[0])+'<span class="sub">'+esc(sub)+'</span></span>'
+      + '<span class="sz">'+fmt(dir?e.size:e[1])+'</span></li>';
+  }
+
+  function render() {
+    const q = $('#q').value.trim().toLowerCase();
+    const node = cur();
+    $('#crumbs').innerHTML = stack.map((n,i) => {
+      const label = esc(i===0 ? data.name : n[0]);
+      return i === stack.length-1 ? '<span class="cur">'+label+'</span>' : '<a data-d="'+i+'">'+label+'</a><i>/</i>';
+    }).join(' ');
+    shown = []; let html = '';
+    if (q) {
+      const hits = [];
+      (function find(n, chain){
+        for (const e of n[1]) {
+          if (hits.length >= 300) return;
+          if (e[0].toLowerCase().includes(q)) hits.push({e, chain});
+          if (isDir(e)) find(e, [...chain, e]);
+        }
+      })(node, stack);
+      for (const h of hits) { shown.push(h); html += row(h.e, h.chain.slice(1).map(n=>n[0]).join(' / ') || '(top level)'); }
+      $('#list').innerHTML = html;
+      $('#msg').innerHTML = hits.length ? (hits.length>=300 ? '<div class="note">Showing the first 300 matches. Type more to narrow.</div>' : '') : '';
+      if (!hits.length) note('No matches', 'Nothing here contains "'+$('#q').value.trim()+'".');
+      return;
+    }
+    for (const e of sorted(node[1])) { shown.push({e, chain: stack}); html += row(e); }
+    $('#list').innerHTML = html;
+    $('#msg').innerHTML = '';
+    if (!node[1].length) note('Empty folder');
+  }
+
+  function go(next) {
+    stack = next;
+    history.pushState({d: stack.length}, '');
+    $('#q').value = '';
+    render();
+    scrollTo(0, 0);
+  }
+
+  $('#list').addEventListener('click', ev => {
+    const li = ev.target.closest('li'); if (!li) return;
+    const h = shown[+li.dataset.i];
+    if (isDir(h.e)) go([...h.chain, h.e]);
+    else if ($('#q').value.trim()) go(h.chain);
+  });
+  $('#crumbs').addEventListener('click', ev => {
+    const a = ev.target.closest('a'); if (a) go(stack.slice(0, +a.dataset.d + 1));
+  });
+  addEventListener('popstate', ev => {
+    stack = stack.slice(0, (ev.state && ev.state.d) || 1);
+    $('#q').value = '';
+    render();
+  });
+  $('#q').addEventListener('input', render);
+  $('#sort').addEventListener('change', render);
+  history.replaceState({d: 1}, '');
+  render();
+})();
+</script>
+</body>
+</html>
